@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Application de Visioconférence</title>
+  <link rel="stylesheet" href="/styles.css">
+  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+</head>
+<body>
+  <h1>Visioconférence avec WebRTC</h1>
+  <div id="controls">
+    <input type="text" id="roomId" placeholder="Entrez l'ID de la room">
+    <button onclick="joinRoom()">Rejoindre la room</button>
+    <button onclick="leaveRoom()">Quitter la room</button>
+    <button onclick="toggleVideo()">Activer/Désactiver Vidéo</button>
+    <button onclick="toggleAudio()">Activer/Désactiver Micro</button>
+    <button onclick="shareScreen()">Partager l’écran</button>
+  </div>
+  <div id="videos">
+    <video id="localVideo" autoplay muted></video>
+    <div id="remoteVideos"></div>
+  </div>
+  <div id="chat">
+    <div id="chatMessages"></div>
+    <div id="chatInput">
+      <input type="text" id="messageInput" placeholder="Entrez votre message">
+      <button onclick="sendMessage()">Envoyer</button>
+    </div>
+  </div>
+  <script>
+    // Initialiser PeerJS
+    const peer = new Peer({
+      host: 'localhost',
+      port: 9000,
+      path: '/webrtc-app',
+      secure: true
+    });
+
+    // Initialiser Socket.IO
+    const socket = io('https://localhost:3000');
+
+    let localStream;
+    let isVideoEnabled = true;
+    let isAudioEnabled = true;
+    const remoteVideos = document.getElementById('remoteVideos');
+    const chatMessages = document.getElementById('chatMessages');
+
+    // Lorsque le pair est prêt
+    peer.on('open', (id) => {
+      console.log('Mon ID PeerJS:', id);
+    });
+
+    // Fonction pour rejoindre une room
+    async function joinRoom() {
+      const roomId = document.getElementById('roomId').value;
+      if (!roomId) {
+        alert('Veuillez entrer un ID de room');
+        return;
+      }
+
+      try {
+        // Accéder à la caméra et au microphone
+        localStream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: true
+        });
+        document.getElementById('localVideo').srcObject = localStream;
+
+        // Rejoindre la room via Socket.IO
+        socket.emit('join-room', roomId, peer.id);
+
+        // Gérer les nouveaux utilisateurs connectés
+        socket.on('user-connected', (userId) => {
+          console.log('Utilisateur connecté:', userId);
+          connectToNewUser(userId, localStream);
+        });
+
+        // Gérer les utilisateurs déconnectés
+        socket.on('user-disconnected', (userId) => {
+          console.log('Utilisateur déconnecté:', userId);
+          const videoElement = document.getElementById(`video-${userId}`);
+          if (videoElement) {
+            videoElement.remove();
+          }
+        });
+
+        // Gérer les messages de chat
+        socket.on('chat-message', ({ message, userId }) => {
+          addChatMessage(`${userId}: ${message}`);
+        });
+
+        // Gérer les appels entrants
+        peer.on('call', (call) => {
+          call.answer(localStream);
+          call.on('stream', (remoteStream) => {
+            addVideoStream(remoteStream, call.peer);
+          });
+        });
+      } catch (err) {
+        console.error('Erreur getUserMedia:', err);
+        alert('Impossible d’accéder à la caméra ou au microphone.');
+      }
+    }
+
+    // Fonction pour quitter la room
+    function leaveRoom() {
+      if (localStream) {
+        localStream.getTracks().forEach(track => track.stop());
+        localStream = null;
+      }
+      document.getElementById('localVideo').srcObject = null;
+      remoteVideos.innerHTML = '';
+      chatMessages.innerHTML = '';
+      socket.disconnect();
+      setTimeout(() => {
+        socket.connect();
+      }, 1000);
+    }
+
+    // Fonction pour activer/désactiver la vidéo
+    function toggleVideo() {
+      if (localStream) {
+        isVideoEnabled = !isVideoEnabled;
+        localStream.getVideoTracks().forEach(track => {
+          track.enabled = isVideoEnabled;
+        });
+      }
+    }
+
+    // Fonction pour activer/désactiver le microphone
+    function toggleAudio() {
+      if (localStream) {
+        isAudioEnabled = !isAudioEnabled;
+        localStream.getAudioTracks().forEach(track => {
+          track.enabled = isAudioEnabled;
+        });
+      }
+    }
+
+    // Fonction pour partager l’écran
+    async function shareScreen() {
+      try {
+        // Arrêter le flux actuel
+        if (localStream) {
+          localStream.getTracks().forEach(track => track.stop());
+        }
+        // Obtenir le flux de l’écran
+        localStream = await navigator.mediaDevices.getDisplayMedia({
+          video: true
+        });
+        document.getElementById('localVideo').srcObject = localStream;
+
+        // Mettre à jour les appels existants
+        socket.emit('join-room', document.getElementById('roomId').value, peer.id);
+      } catch (err) {
+        console.error('Erreur getDisplayMedia:', err);
+        alert('Impossible de partager l’écran.');
+      }
+    }
+
+    // Fonction pour connecter un nouvel utilisateur
+    function connectToNewUser(userId, stream) {
+      const call = peer.call(userId, stream);
+      call.on('stream', (remoteStream) => {
+        addVideoStream(remoteStream, userId);
+      });
+      call.on('close', () => {
+        const videoElement = document.getElementById(`video-${userId}`);
+        if (videoElement) {
+          videoElement.remove();
+        }
+      });
+    }
+
+    // Fonction pour ajouter un flux vidéo
+    function addVideoStream(stream, userId) {
+      if (document.getElementById(`video-${userId}`)) {
+        return;
+      }
+      const video = document.createElement('video');
+      video.id = `video-${userId}`;
+      video.srcObject = stream;
+      video.autoplay = true;
+      remoteVideos.appendChild(video);
+    }
+
+    // Fonction pour envoyer un message de chat
+    function sendMessage() {
+      const messageInput = document.getElementById('messageInput');
+      const message = messageInput.value.trim();
+      if (message) {
+        socket.emit('chat-message', message, peer.id);
+        addChatMessage(`Moi: ${message}`);
+        messageInput.value = '';
+      }
+    }
+
+    // Fonction pour ajouter un message au chat
+    function addChatMessage(message) {
+      const messageElement = document.createElement('p');
+      messageElement.textContent = message;
+      chatMessages.appendChild(messageElement);
+      chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+
+    // Gestion des erreurs PeerJS
+    peer.on('error', (err) => {
+      console.error('Erreur PeerJS:', err);
+      alert('Une erreur s’est produite avec PeerJS: ' + err.message);
+    });
+
+    // Envoyer un message en appuyant sur Entrée
+    document.getElementById('messageInput').addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') {
+        sendMessage();
+      }
+    });
+  </script>
+</body>
+</html>
